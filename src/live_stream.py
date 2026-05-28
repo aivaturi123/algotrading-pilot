@@ -2,75 +2,82 @@
 Layer 1 (live mode): Schwab WebSocket stream via schwabdev.
 Import this instead of mock_stream once your Schwab Developer Portal app
 shows status "Ready for Use" and your tokens.json has been generated.
-
-Usage in main.py (live mode):
-    from src.live_stream import SchwabLiveStream
-    stream = SchwabLiveStream(symbols=["AAPL", "TSLA"])
-    stream.start(on_tick_callback)
 """
 
+import json
 import os
 import queue
-import threading
-from typing import Callable
 
-try:
-    import schwabdev
-except ImportError:
-    schwabdev = None  # type: ignore[assignment]
+import schwabdev
 
 
 class SchwabLiveStream:
     """
-    Wraps the schwabdev streaming client so the rest of the pipeline can
-    consume ticks the same way it consumes mock_stream ticks.
+    Wraps schwabdev's Stream class so the rest of the pipeline consumes
+    ticks in the same dict format as mock_stream produces.
 
-    The WebSocket runs on a background thread; ticks are pushed into a
-    thread-safe queue and yielded by the `iter_ticks` generator so the
-    main loop stays single-threaded and easy to reason about.
+    The WebSocket runs on a background daemon thread managed by schwabdev.
+    Incoming raw JSON strings are parsed and normalised into our standard
+    tick shape, then pushed into a thread-safe queue for the main loop.
     """
 
     def __init__(self, symbols: list[str]) -> None:
-        if schwabdev is None:
-            raise ImportError(
-                "schwabdev is not installed. Run: pip install schwabdev"
-            )
         self.symbols = symbols
         self._queue: queue.Queue[dict] = queue.Queue()
+
         self._client = schwabdev.Client(
             app_key=os.environ["SCHWAB_CLIENT_ID"],
             app_secret=os.environ["SCHWAB_CLIENT_SECRET"],
             callback_url="https://127.0.0.1",
         )
+        # Stream is a separate class — must be instantiated with the client
+        self._stream = schwabdev.Stream(self._client)
 
-    def _on_message(self, raw: dict) -> None:
-        """Callback registered with schwabdev — pushes every tick into the queue."""
-        self._queue.put(raw)
+    def _on_message(self, raw: str) -> None:
+        """
+        Receiver callback registered with schwabdev.
+        Raw is a JSON string — parse it, extract LEVELONE_EQUITIES content,
+        and push each tick into the queue in our standard format.
+        """
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        # Schwab streaming envelope: {"data": [{...}, ...]}
+        for block in msg.get("data", []):
+            if block.get("service") != "LEVELONE_EQUITIES":
+                continue
+            for item in block.get("content", []):
+                tick = {
+                    "service":   "LEVELONE_EQUITIES",
+                    "timestamp": block.get("timestamp", 0),
+                    "command":   block.get("command", "SUBS"),
+                    "content":   [item],
+                }
+                self._queue.put(tick)
 
     def start(self) -> None:
         """
-        Subscribe to LEVELONE_EQUITIES for all configured symbols and begin
-        streaming.  Blocks until the connection is established, then returns.
-        The WebSocket runs on a daemon thread managed by schwabdev.
+        Subscribe to LEVELONE_EQUITIES for all configured symbols and
+        begin streaming on a background daemon thread.
         """
-        self._client.stream.start(
-            self._on_message,
-            daemon=True,
-        )
-        # Subscribe to level-1 equity quotes for our symbols
-        self._client.stream.send(
-            self._client.stream.level_one_equities(
-                ",".join(self.symbols),
-                "1,2,8",   # fields: bid, ask, volume
+        self._stream.start(self._on_message, daemon=True)
+
+        # fields: 1=bid, 2=ask, 8=volume
+        self._stream.send(
+            self._stream.level_one_equities(
+                keys=self.symbols,
+                fields=[1, 2, 8],
             )
         )
         print(f"[LIVE STREAM] Subscribed to: {', '.join(self.symbols)}")
 
     def iter_ticks(self):
-        """Yield ticks from the background WebSocket thread one at a time."""
+        """Yield ticks from the background thread one at a time."""
         while True:
             yield self._queue.get()
 
     def stop(self) -> None:
-        self._client.stream.stop()
+        self._stream.stop()
         print("[LIVE STREAM] Connection closed.")

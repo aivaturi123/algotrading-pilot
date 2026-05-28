@@ -11,8 +11,7 @@ Run:
 """
 
 import os
-import signal
-import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -24,11 +23,13 @@ load_dotenv()
 
 TRADING_MODE    = os.getenv("TRADING_MODE", "paper").lower()
 WATCH_SYMBOLS   = [s.strip() for s in os.getenv("WATCH_SYMBOLS", "AAPL").split(",")]
-STD_DEV_TRIGGER = 2.5    # sigma threshold that wakes the AI filter
-AI_CONFIDENCE   = 0.85   # minimum Gemini confidence to allow a fill
-ORDER_QTY       = 10     # shares per simulated fill
-MOCK_DURATION   = 120    # seconds to run mock stream (paper mode)
-MOCK_TICK_DELAY = 0.04   # seconds between synthetic ticks (~25 ticks/sec)
+STD_DEV_TRIGGER  = 2.0    # sigma threshold that wakes the AI filter
+MIN_BREACH_SIGMA = 0.5    # price must exceed the band by this many extra sigmas before calling Gemini
+AI_CONFIDENCE    = 0.85   # minimum Gemini confidence to allow a fill
+ORDER_QTY        = 10     # shares per simulated fill
+MOCK_DURATION    = 120    # seconds to run mock stream (paper mode)
+MOCK_TICK_DELAY  = 0.04   # seconds between synthetic ticks (~25 ticks/sec)
+AI_COOLDOWN_SECS = 60     # seconds to wait per symbol before calling Gemini again
 
 # ---------------------------------------------------------------------------
 # Layer imports
@@ -56,7 +57,10 @@ def run_pipeline() -> None:
     ai_validator = TradingAIFilter()
 
     # Layer 4 — paper execution ledger
-    paper_broker = LocalPaperLedger(initial_cash=100_000.0)
+    paper_broker = LocalPaperLedger(initial_cash=200_000.0)
+
+    # Tracks the last time Gemini was called per symbol to enforce cooldown
+    last_ai_call: dict[str, float] = {}
 
     mode_label = "LIVE (paper ledger)" if TRADING_MODE == "live" else "DRY-RUN (mock data)"
     print(f"\n  Trading Pipeline — {mode_label}")
@@ -105,12 +109,23 @@ def run_pipeline() -> None:
             if current_bid <= upper_band or std_dev == 0:
                 continue   # normal market noise — discard silently
 
+            # Guard A: breach must be meaningful, not just barely over the band
+            sigma_breach = (current_bid - rolling_mean) / std_dev
+            if sigma_breach < STD_DEV_TRIGGER + MIN_BREACH_SIGMA:
+                continue   # too shallow — not worth an AI call
+
+            # Guard B: per-symbol cooldown — don't hammer Gemini on every tick
+            now = time.time()
+            if now - last_ai_call.get(symbol, 0) < AI_COOLDOWN_SECS:
+                continue   # still in cooldown for this symbol
+
             print(
                 f"\n  [THRESHOLD TRIP] {symbol}  "
                 f"bid=${current_bid:.2f}  "
                 f"band=${upper_band:.2f}  "
-                f"(mean={rolling_mean:.2f}, sigma={std_dev:.4f})"
+                f"(mean={rolling_mean:.2f}, sigma={std_dev:.4f}, breach={sigma_breach:.2f}σ)"
             )
+            last_ai_call[symbol] = now
             print("  Consulting Gemini 2.5 Flash...")
 
             context_snapshot = {
