@@ -22,7 +22,24 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 TRADING_MODE    = os.getenv("TRADING_MODE", "paper").lower()
-WATCH_SYMBOLS   = [s.strip() for s in os.getenv("WATCH_SYMBOLS", "AAPL").split(",")]
+
+# Load symbols — set WATCH_SYMBOLS="volatile" in .env to use the curated 50-stock list
+# or set WATCH_SYMBOLS="AAPL,TSLA" for a custom list
+_symbols_env = os.getenv("WATCH_SYMBOLS", "volatile").strip().lower()
+if _symbols_env == "volatile":
+    from src.watchlist import VOLATILE
+    WATCH_SYMBOLS = VOLATILE
+elif _symbols_env == "crypto":
+    from src.watchlist import CRYPTO_PROXIES
+    WATCH_SYMBOLS = CRYPTO_PROXIES
+elif _symbols_env == "ai":
+    from src.watchlist import AI_PLAYS
+    WATCH_SYMBOLS = AI_PLAYS
+elif _symbols_env == "ev":
+    from src.watchlist import EV_ENERGY
+    WATCH_SYMBOLS = EV_ENERGY
+else:
+    WATCH_SYMBOLS = [s.strip().upper() for s in _symbols_env.split(",")]
 STD_DEV_TRIGGER  = 2.0    # sigma threshold that wakes the AI filter
 MIN_BREACH_SIGMA = 0.5    # price must exceed the band by this many extra sigmas before calling Gemini
 AI_CONFIDENCE    = 0.85   # minimum Gemini confidence to allow a fill
