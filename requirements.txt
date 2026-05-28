@@ -1,0 +1,5 @@
+schwabdev
+polars
+google-genai
+pydantic
+python-dotenv
