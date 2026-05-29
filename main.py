@@ -2,9 +2,8 @@
 main.py — Central orchestrator that wires all four pipeline layers together.
 
 TRADING_MODE (set in .env):
-  "paper"  →  uses mock_stream (synthetic data) + LocalPaperLedger
-  "live"   →  uses live_stream (real Schwab WebSocket) + LocalPaperLedger
-              (swap LocalPaperLedger for a real broker call when ready)
+  "paper"  →  mock stream (synthetic ticks) + LocalPaperLedger (no real orders)
+  "live"   →  SchwabLiveStream (real WebSocket) + SchwabLiveBroker (real orders)
 
 Run:
   python main.py
@@ -21,7 +20,7 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-TRADING_MODE    = os.getenv("TRADING_MODE", "paper").lower()
+TRADING_MODE = os.getenv("TRADING_MODE", "paper").lower()
 
 # Load symbols — set WATCH_SYMBOLS="volatile" in .env to use the curated 50-stock list
 # or set WATCH_SYMBOLS="AAPL,TSLA" for a custom list
@@ -40,14 +39,15 @@ elif _symbols_env == "ev":
     WATCH_SYMBOLS = EV_ENERGY
 else:
     WATCH_SYMBOLS = [s.strip().upper() for s in _symbols_env.split(",")]
+
 STD_DEV_TRIGGER  = 2.0    # sigma threshold that wakes the AI filter
 MIN_BREACH_SIGMA = 0.5    # price must exceed the band by this many extra sigmas before calling Gemini
 AI_CONFIDENCE    = 0.85   # minimum Gemini confidence to allow a fill
-ORDER_QTY        = 10     # shares per simulated fill
+ORDER_QTY        = 10     # shares per order
 MOCK_DURATION    = 120    # seconds to run mock stream (paper mode)
 MOCK_TICK_DELAY  = 0.04   # seconds between synthetic ticks (~25 ticks/sec)
 AI_COOLDOWN_SECS = 60     # seconds to wait per symbol before calling Gemini again
-DEBUG_MODE       = os.getenv("DEBUG_MODE", "false").lower() == "true"  # print every tick for spot-checking
+DEBUG_MODE       = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Layer imports
@@ -55,12 +55,13 @@ DEBUG_MODE       = os.getenv("DEBUG_MODE", "false").lower() == "true"  # print e
 
 from src.feature_engineering import PolarsTickAggregator
 from src.ai_filter import TradingAIFilter
-from src.simulation_ledger import LocalPaperLedger
 
 if TRADING_MODE == "live":
-    from src.live_stream import SchwabLiveStream
+    from src.live_stream  import SchwabLiveStream
+    from src.live_broker  import SchwabLiveBroker
 else:
-    from src.mock_stream import stream_market_data
+    from src.mock_stream       import stream_market_data
+    from src.simulation_ledger import LocalPaperLedger
 
 
 # ---------------------------------------------------------------------------
@@ -74,17 +75,25 @@ def run_pipeline() -> None:
     # Layer 3 — AI risk filter (only called on threshold trips)
     ai_validator = TradingAIFilter()
 
-    # Layer 4 — paper execution ledger
-    paper_broker = LocalPaperLedger(initial_cash=200_000.0)
+    # Layer 4 — execution layer (live orders or paper simulation)
+    if TRADING_MODE == "live":
+        broker = SchwabLiveBroker()
+    else:
+        broker = LocalPaperLedger(initial_cash=200_000.0)
 
     # Tracks the last time Gemini was called per symbol to enforce cooldown
     last_ai_call: dict[str, float] = {}
 
-    mode_label = "LIVE (paper ledger)" if TRADING_MODE == "live" else "DRY-RUN (mock data)"
+    if TRADING_MODE == "live":
+        mode_label = "LIVE TRADING  ⚠  REAL ORDERS WILL BE PLACED"
+    else:
+        mode_label = "PAPER (mock data, no real orders)"
+
     print(f"\n  Trading Pipeline — {mode_label}")
     print(f"  Watching : {', '.join(WATCH_SYMBOLS)}")
     print(f"  Trigger  : price > rolling_mean + {STD_DEV_TRIGGER} * std_dev")
     print(f"  AI gate  : confidence > {AI_CONFIDENCE}")
+    print(f"  Qty/order: {ORDER_QTY} shares")
     print("  Press Ctrl+C to stop.\n")
 
     # ------------------------------------------------------------------
@@ -119,7 +128,7 @@ def run_pipeline() -> None:
             # Layer 1 → Layer 2: ingest and compute rolling stats
             aggregator.add_tick(raw_tick)
 
-            symbol = raw_tick["content"][0]["key"]
+            symbol  = raw_tick["content"][0]["key"]
             metrics = aggregator.calculate_signals(symbol)
 
             if metrics.is_empty():
@@ -181,7 +190,7 @@ def run_pipeline() -> None:
             # Gate 3: execute only on high-confidence BUY signal
             # ----------------------------------------------------------
             if decision.action == "BUY" and decision.confidence > AI_CONFIDENCE:
-                paper_broker.execute_paper_order(
+                broker.execute_order(
                     symbol=symbol,
                     action="BUY",
                     qty=ORDER_QTY,
@@ -195,7 +204,7 @@ def run_pipeline() -> None:
     finally:
         if TRADING_MODE == "live":
             stream.stop()
-        paper_broker.print_summary()
+        broker.print_summary()
 
 
 if __name__ == "__main__":

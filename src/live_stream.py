@@ -48,10 +48,6 @@ class SchwabLiveStream:
                 print(f"  [STREAM RAW] Could not parse: {str(raw)[:120]}")
             return
 
-        if self.debug:
-            # Print full message (no truncation) for complete diagnostics
-            print(f"  [STREAM RAW] keys={list(msg.keys())}  msg={str(msg)}")
-
         # ---------------------------------------------------------------
         # Subscription acknowledgments arrive in msg["response"].
         # Always print these so we see successes AND failures (code 22 etc.)

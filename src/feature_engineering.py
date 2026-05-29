@@ -27,14 +27,24 @@ class PolarsTickAggregator:
     # ------------------------------------------------------------------
 
     def add_tick(self, raw_tick: dict) -> None:
-        """Parse a raw Schwab-format tick packet and append it to the buffer."""
+        """Parse a raw Schwab-format tick packet and append it to the buffer.
+
+        Schwab uses differential updates — only changed fields are sent in each
+        message.  A tick with no field "1" (bid) means the bid is unchanged,
+        not zero.  We skip such ticks rather than storing a bogus 0.0 that
+        would corrupt the rolling mean/std.
+        """
         content = raw_tick["content"][0]
         symbol: str = content["key"]
+
+        # Skip ticks that carry no bid price (differential update, nothing new)
+        if "1" not in content:
+            return
 
         new_row = pl.DataFrame({
             "timestamp":  [int(raw_tick["timestamp"])],
             "symbol":     [symbol],
-            "bid":        [float(content.get("1", 0.0))],
+            "bid":        [float(content["1"])],
             "ask":        [float(content.get("2", 0.0))],
             "volume":     [int(content.get("8", 0))],
         })

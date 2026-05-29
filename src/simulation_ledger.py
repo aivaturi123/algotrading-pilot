@@ -105,6 +105,10 @@ class LocalPaperLedger:
         )
         return True
 
+    # Alias — same interface as SchwabLiveBroker so main.py can use one call
+    def execute_order(self, symbol, action, qty, market_price):
+        return self.execute_paper_order(symbol, action, qty, market_price)
+
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
