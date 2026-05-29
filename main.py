@@ -47,6 +47,7 @@ ORDER_QTY        = 10     # shares per simulated fill
 MOCK_DURATION    = 120    # seconds to run mock stream (paper mode)
 MOCK_TICK_DELAY  = 0.04   # seconds between synthetic ticks (~25 ticks/sec)
 AI_COOLDOWN_SECS = 60     # seconds to wait per symbol before calling Gemini again
+DEBUG_MODE       = os.getenv("DEBUG_MODE", "false").lower() == "true"  # print every tick for spot-checking
 
 # ---------------------------------------------------------------------------
 # Layer imports
@@ -90,7 +91,7 @@ def run_pipeline() -> None:
     # Choose tick source based on TRADING_MODE
     # ------------------------------------------------------------------
     if TRADING_MODE == "live":
-        stream = SchwabLiveStream(symbols=WATCH_SYMBOLS)
+        stream = SchwabLiveStream(symbols=WATCH_SYMBOLS, debug=DEBUG_MODE)
         stream.start()
         tick_source = stream.iter_ticks()
     else:
@@ -105,6 +106,16 @@ def run_pipeline() -> None:
     # ------------------------------------------------------------------
     try:
         for raw_tick in tick_source:
+            # Debug: print every raw tick received before any filtering
+            if DEBUG_MODE:
+                from datetime import datetime
+                content = raw_tick.get("content", [{}])[0]
+                print(
+                    f"  [RAW TICK] {datetime.now().strftime('%H:%M:%S')}  "
+                    f"{content.get('key','?'):<6}  "
+                    f"bid=${content.get('1', '?')}"
+                )
+
             # Layer 1 → Layer 2: ingest and compute rolling stats
             aggregator.add_tick(raw_tick)
 

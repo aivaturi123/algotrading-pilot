@@ -21,8 +21,9 @@ class SchwabLiveStream:
     tick shape, then pushed into a thread-safe queue for the main loop.
     """
 
-    def __init__(self, symbols: list[str]) -> None:
+    def __init__(self, symbols: list[str], debug: bool = False) -> None:
         self.symbols = symbols
+        self.debug = debug
         self._queue: queue.Queue[dict] = queue.Queue()
 
         self._client = schwabdev.Client(
@@ -42,7 +43,12 @@ class SchwabLiveStream:
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
+            if self.debug:
+                print(f"  [STREAM RAW] Could not parse: {str(raw)[:120]}")
             return
+
+        if self.debug:
+            print(f"  [STREAM RAW] keys={list(msg.keys())}  preview={str(msg)[:200]}")
 
         # Schwab streaming envelope: {"data": [{...}, ...]}
         for block in msg.get("data", []):
@@ -59,24 +65,33 @@ class SchwabLiveStream:
 
     def start(self) -> None:
         """
-        Subscribe to LEVELONE_EQUITIES for all configured symbols and
-        begin streaming on a background daemon thread.
+        Pre-load subscriptions before starting the stream so they are
+        replayed automatically right after login completes.
         """
-        self._stream.start(self._on_message, daemon=True)
-
-        # fields: 1=bid, 2=ask, 8=volume
+        # Register subscription BEFORE start() so schwabdev replays it
+        # immediately after the login handshake — avoids the race condition
+        # where send() fires before self.active is True.
         self._stream.send(
             self._stream.level_one_equities(
                 keys=self.symbols,
-                fields=[1, 2, 8],
+                fields=[1, 2, 8],      # 1=bid, 2=ask, 8=volume (key is always present)
+                command="SUBS",        # full replace, not incremental add
             )
         )
+
+        self._stream.start(self._on_message, daemon=True)
         print(f"[LIVE STREAM] Subscribed to: {', '.join(self.symbols)}")
 
     def iter_ticks(self):
-        """Yield ticks from the background thread one at a time."""
+        """
+        Yield ticks from the background thread one at a time.
+        Uses a 1-second timeout so Ctrl+C can interrupt the blocking queue call.
+        """
         while True:
-            yield self._queue.get()
+            try:
+                yield self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
 
     def stop(self) -> None:
         self._stream.stop()
