@@ -58,10 +58,21 @@ class TradingAIFilter:
         self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
         self.model_name = "gemini-2.5-flash"
 
+    _LOG_PATH = "gemini_decisions.jsonl"
+
+    def _write_log(self, entry: dict) -> None:
+        """Append one JSON record to the decisions log file."""
+        with open(self._LOG_PATH, "a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+
     def evaluate_metrics(self, symbol: str, stats: dict) -> TradeDecision:
         """
         Send a compact statistical snapshot to Gemini and receive a
         structured TradeDecision back.
+
+        Every call — success or error — is appended to gemini_decisions.jsonl
+        with the full prompt, raw response, and parsed decision so you can
+        review exactly why each trade was or wasn't taken.
 
         Args:
             symbol:  Ticker, e.g. "AAPL"
@@ -72,6 +83,9 @@ class TradingAIFilter:
             TradeDecision — guaranteed by Pydantic validation.
             Falls back to HOLD on any API or parsing error.
         """
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         prompt = (
             f"Analyze a real-time breakout event for {symbol}.\n"
             f"Statistical snapshot:\n{json.dumps(stats, indent=2)}\n\n"
@@ -88,14 +102,42 @@ class TradingAIFilter:
                     system_instruction=self._SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
                     response_schema=TradeDecision,
-                    temperature=0.1,   # low temp = consistent, structured output
+                    temperature=0.1,
                 ),
             )
-            return TradeDecision.model_validate_json(response.text)
+            decision = TradeDecision.model_validate_json(response.text)
+
+            self._write_log({
+                "timestamp":        ts,
+                "symbol":           symbol,
+                "input_stats":      stats,
+                "system_prompt":    self._SYSTEM_INSTRUCTION,
+                "user_prompt":      prompt,
+                "raw_response":     response.text,
+                "decision": {
+                    "action":       decision.action,
+                    "confidence":   decision.confidence,
+                    "urgency":      decision.urgency,
+                    "reason_code":  decision.reason_code,
+                },
+                "error": None,
+            })
+
+            return decision
 
         except Exception as exc:
-            # Never crash the pipeline on an AI error — degrade gracefully
-            error_code = f"AI_ERR_{str(exc)[:20].replace(' ', '_').upper()}"
+            error_msg = str(exc)
+            self._write_log({
+                "timestamp":     ts,
+                "symbol":        symbol,
+                "input_stats":   stats,
+                "system_prompt": self._SYSTEM_INSTRUCTION,
+                "user_prompt":   prompt,
+                "raw_response":  None,
+                "decision":      None,
+                "error":         error_msg,
+            })
+            error_code = f"AI_ERR_{error_msg[:20].replace(' ', '_').upper()}"
             return TradeDecision(
                 action="HOLD",
                 confidence=0.0,
