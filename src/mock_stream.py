@@ -18,11 +18,11 @@ _BASE_PRICES: dict[str, float] = {
 
 def stream_market_data(
     symbols: list[str] | None = None,
-    duration_seconds: int = 60,
     delay: float = 0.04,
 ) -> Iterator[dict]:
     """
     Yields synthetic tick dicts that look like Schwab LEVELONE_EQUITIES packets.
+    Runs indefinitely until the caller stops iterating (e.g. Ctrl-C).
 
     Each yielded dict has this shape (matching the Schwab streaming spec):
         {
@@ -44,9 +44,8 @@ def stream_market_data(
         symbols = ["AAPL"]
 
     prices = {s: _BASE_PRICES.get(s, 100.0) for s in symbols}
-    end_time = time.time() + duration_seconds
 
-    while time.time() < end_time:
+    while True:
         symbol = random.choice(symbols)
         price = prices[symbol]
 
